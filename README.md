@@ -65,7 +65,7 @@ Le binaire et le fichier de configuration seront installés par défaut dans */o
 /opt/teleinfo/teleinfo -v --tty /dev/ttyAMA0
 ```
 
-# Support MySQL
+## Support MySQL
 
 Lancer ce code dans MySQL :
 ``` sql
