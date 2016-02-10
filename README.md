@@ -44,6 +44,20 @@ Installation et configuration
 
 Tout est documenté sur la page dédié [teleinfo][5] de son blog. Mais je vais quand même détailler un peu ici.
 
+Éditer le fichier ``Makefile`` :
+  - pour compiler le support MySQL, décommenter les 2 lignes :
+``` .sh
+#CFLAGSSQL=-DUSE_MYSQL
+#LIBSSQL=-lmysqlclient
+```
+  - pour compiler le support EmonCMS, décommenter les 2 lignes :
+``` .sh
+#CFLAGSEMONCMS=-DUSE_EMONCMS 
+#LIBSEMONCMS=-lcurl 
+```
+Lancer la commande ``make``
+
+
 License
 =======
 
