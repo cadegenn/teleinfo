@@ -14,12 +14,12 @@ LIBSSQL=-lmysqlclient
 # if you do not want to compile for EMONCMS publication
 # remove the link to curl library
 # Comment these 2 following lines if you do not want to use emoncms features
-CFLAGSEMONCMS=-DUSE_EMONCMS 
-LIBSEMONCMS=-lcurl 
+#CFLAGSEMONCMS=-DUSE_EMONCMS 
+#LIBSEMONCMS=-lcurl 
 
 # Where you want it installed when you do 'make install'
 # /bin will be added to that prefix.
-PREFIX=/usr/local
+PREFIX=/opt/teleinfo
 
 OBJS= teleinfo.o 
 
@@ -35,9 +35,9 @@ teleinfo: teleinfo.o
 
 # ===== Install
 install: teleinfo 
-	if ( test ! -d $(PREFIX)/bin ) ; then mkdir -p $(PREFIX)/bin ; fi
-	cp -f teleinfo $(PREFIX)/bin/teleinfo
-	chmod a+x $(PREFIX)/bin/teleinfo
+	if ( test ! -d $(PREFIX) ) ; then mkdir -p $(PREFIX) ; fi
+	cp -f teleinfo $(PREFIX)/teleinfo
+	chmod a+x $(PREFIX)/teleinfo
 
 clean: 
 	rm -f *.o teleinfo 
