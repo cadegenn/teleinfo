@@ -1,6 +1,6 @@
 /* ======================================================================
 Program : teleinfo
-Version : 1.0.8
+Version : 2.0.0
 Purpose : send/recevice teleinformation from severals devices then can 
           - write to MySql
           - write to Emoncms
@@ -8,6 +8,8 @@ Purpose : send/recevice teleinformation from severals devices then can
 
 Author  : (c) Charles-Henri Hallard
           http://hallard.me
+Modified by : (c) Charles-Antoine Degennes
+		  https://github.com/cadegenn/raspberry
 Comments: some code grabbed from picocom and other from teleinfo
   : You can use or distribute this code unless you leave this comment
   : too see this code correctly indented, please use Tab values of 2
@@ -15,6 +17,7 @@ Comments: some code grabbed from picocom and other from teleinfo
   12/09/2013 : Added Linked List for only post real time changed values
   30/03/2014 : Added Emoncms real time post (only changed values)
   15/04/2014 : Added configuration parameters with also config file
+  29/01/2016 : clean code to do 1 thing : wait for a frame on serial port, display it / add it to MySQL
 ====================================================================== */
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,10 +49,10 @@ Comments: some code grabbed from picocom and other from teleinfo
 #define false 0
 
 // Directory where we are when in daemon mode
-#define PRG_DIR             "/usr/local/bin" 
 #define PRG_NAME            "teleinfo"
+#define PRG_DIR             "/opt/"PRG_NAME 
 #define PRG_VERSION_NUMBER  "1.0.8"
-#define PRG_CFG             "/etc/teleinfo.conf"
+#define PRG_CFG             PRG_DIR"/teleinfo.conf"
 
 #if (defined USE_EMONCS && defined USE_MYSQL)
   #define PRG_VERSION    PRG_VERSION_NUMBER " (with mysql and emoncms)"
@@ -63,8 +66,6 @@ Comments: some code grabbed from picocom and other from teleinfo
 
 // Define teleinfo mode, device or network
 #define TELEINFO_DEVICE   ""
-#define TELEINFO_PORT     1200          // Port used to send frame over Network
-#define TELEINFO_NETWORK  "10.10.0.0"   // Broadcast or specific IP where to send frame
 
 #define UUCP_LOCK_DIR "/var/lock"
 
@@ -137,6 +138,7 @@ struct
   char apikey[HTTP_APIKEY_SIZE];
 #endif
   int daemon;
+  int sleep;	// amount of time to sleep between reading 2 frames in daemon mode
 // Configuration structure defaults values
 } opts = {
   .port = "",
@@ -149,10 +151,8 @@ struct
   .nolock = false,
   .mode = MODE_NONE,
   .mode_str = "receive",
-  .netport = TELEINFO_PORT,
   .verbose = false,
   .value_str = "",
-  .network = TELEINFO_NETWORK,
 #ifdef USE_MYSQL
   .mysql = false,
   .server = MYSQL_HOST,
@@ -213,7 +213,7 @@ struct _ValueList
 int   g_fd_teleinfo;          // teleinfo serial handle
 struct termios g_oldtermios ; // old serial config
 int   g_tlf_sock;             // teleinfo socket 
-int   g_exit_pgm;             // indicate en of the program
+int   g_exit_pgm;             // indicate end of the program
 char  g_lockname[256] = "";   // Lock filename
 #ifdef USE_EMONCMS
   CURL *g_pcurl;
@@ -273,12 +273,10 @@ Comments:
 void show_stats(void)
 {
   // Print stats
-  int old_opt = opts.daemon;
   int old_verb = opts.verbose;
   
   // Fake daemon/verbose mode to display info
   // We'll restore it after
-  opts.daemon = false;
   opts.verbose = true;
   
   log_syslog(stderr, "\n"PRG_NAME" "PRG_VERSION_NUMBER" Statistics\n");
@@ -306,7 +304,6 @@ void show_stats(void)
   log_syslog(stderr, "--------------------------\n");
   
   opts.verbose = old_verb;
-  opts.daemon  = old_opt;
 }
 
 /* ======================================================================
@@ -396,58 +393,6 @@ void fatal (const char *format, ...)
 }
 
 /* ======================================================================
-Function: daemonize
-Purpose : daemonize the pocess
-Input   : -
-Output  : -
-Comments: 
-====================================================================== */
-static void daemonize(void)
-{
-  pid_t pid, sid;
-
-  // already a daemon
-  if ( getppid() == 1 )
-    return;
-
-  // Fork off the parent process
-  pid = fork();
-  if (pid < 0)
-    fatal( "fork() : %s", strerror(errno));
-
-  // If we got a good PID, then we can exit the parent process.
-  if (pid > 0)
-    exit(EXIT_SUCCESS);
-
-
-  // At this point we are executing as the child process
-  // ---------------------------------------------------
-
-  // Change the file mode mask
-  umask(0);
-
-  // Create a new SID for the child process
-  sid = setsid();
-  if (sid < 0)
-    fatal( "setsid() : %s", strerror(errno));
-
-  // Change the current working directory.  This prevents the current
-  // directory from being locked; hence not being able to remove it.
-  if ((chdir(PRG_DIR)) < 0)
-    fatal( "chdir('%s') : %s", PRG_DIR, strerror(errno));
-
-  // Close standard files
-  close(STDIN_FILENO);
-  
-  // if verbose mode, allow display on stdout
-  if (!opts.verbose)
-    close(STDOUT_FILENO);
-    
-  // Always display errors on stderr
-  //close(STDERR_FILENO);
-}
-
-/* ======================================================================
 Function  : valuelist_add
 Purpose   : Add element to the Linked List of values
 Input     : Pointer to the label name
@@ -492,7 +437,7 @@ ValueList * valuelist_add (ValueList * me, char * name, char * value, int lgname
         {
           // We changed the value
           *valuestate = VALUE_CHANGED;
-          // Do we have enought space to hold new value ?
+          // Do we have enough space to hold new value ?
           if (strlen(me->value) >= lgvalue )
           {
             // Copy it
@@ -1003,13 +948,13 @@ Comments:
 void tlf_treat_label( char * plabel, char * pvalue) 
 {
   // emoncms need only numeric values
-  if (opts.emoncms)
-  {
+  //if (opts.emoncms)
+  //{
     if (strcmp(plabel, "OPTARIF")==0 )
     {
-      // L'option tarifaire choisie (Groupe "OPTARIF") est codée sur 4 caractères alphanumériques 
-      /* J'ai pris un nombre arbitraire codé dans l'ordre ci-dessous
-      je mets le 4eme char à 0, trop de possibilités
+      // L'option tarifaire choisie (Groupe "OPTARIF") est codï¿½e sur 4 caractï¿½res alphanumï¿½riques 
+      /* J'ai pris un nombre arbitraire codï¿½ dans l'ordre ci-dessous
+      je mets le 4eme char ï¿½ 0, trop de possibilitï¿½s
       BASE => Option Base. 
       HC.. => Option Heures Creuses. 
       EJP. => Option EJP. 
@@ -1025,15 +970,15 @@ void tlf_treat_label( char * plabel, char * pvalue)
     }
     else if (strcmp(plabel, "HHPHC")==0 )
     {
-      // L'horaire heures pleines/heures creuses (Groupe "HHPHC") est codé par un caractère A à Y 
+      // L'horaire heures pleines/heures creuses (Groupe "HHPHC") est codï¿½ par un caractï¿½re A ï¿½ Y 
       // J'ai choisi de prendre son code ASCII
       int code = *pvalue;
       sprintf(pvalue, "%d", code);
     }
     else if (strcmp(plabel, "PTEC")==0 )
     {
-      // La période tarifaire en cours (Groupe "PTEC"), est codée sur 4 caractères 
-      /* J'ai pris un nombre arbitraire codé dans l'ordre ci-dessous
+      // La pï¿½riode tarifaire en cours (Groupe "PTEC"), est codï¿½e sur 4 caractï¿½res 
+      /* J'ai pris un nombre arbitraire codï¿½ dans l'ordre ci-dessous
       TH.. => Toutes les Heures. 
       HC.. => Heures Creuses. 
       HP.. => Heures Pleines. 
@@ -1060,7 +1005,7 @@ void tlf_treat_label( char * plabel, char * pvalue)
       else strcpy (pvalue, "0");
       
     }
-  }
+  //}
   
     // Do we need to get specific value ?
   if (*opts.value_str)
@@ -1143,7 +1088,8 @@ int tlf_check_frame( char * pframe)
   {
     // First SQL Fields, use date time from mysql server using NOW()
     strcpy(mysql_field, "DATE");
-    strcpy(mysql_value, "NOW()");
+    //strcpy(mysql_value, "NOW()");
+    strcpy(mysql_value, "DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:00')");
   }
 #endif
 
@@ -1219,7 +1165,7 @@ int tlf_check_frame( char * pframe)
             //fprintf(stdout, "%s=%s\n",ptok, pvalue);
             
             // In case we need to do things
-            tlf_treat_label(ptok, pvalue);
+            //tlf_treat_label(ptok, pvalue);
             
             // Add value to linked lists of values
             valuelist_add(p_valueslist, ptok, pvalue, strlen(ptok), strlen(pvalue), &value_state);
@@ -1231,11 +1177,7 @@ int tlf_check_frame( char * pframe)
               strcat(mysql_field, ",");
               strcat(mysql_field, ptok);
               
-              // Compteur Monophasé IINST et IMAX doivent être reliés à
-              // IINST1 et IMAX1 dans la base
-              if (strcmp(ptok, "IINST")==0 || strcmp(ptok, "IMAX")==0)
-                strcat(mysql_field, "1");
-
+              // Compteur Monophasï¿½ IINST et IMAX doivent ï¿½tre reliï¿½s ï¿½
               strcat(mysql_value, ",'");
               strcat(mysql_value, pvalue);
               strcat(mysql_value, "'");
@@ -1251,11 +1193,7 @@ int tlf_check_frame( char * pframe)
               {
                 strcat(emoncms_url, ptok);
                 
-                // Compteur Monophasé IINST et IMAX doivent être reliés à
-                // IINST1 et IMAX1 
-                if (strcmp(ptok, "IINST")==0 || strcmp(ptok, "IMAX")==0)
-                  strcat(emoncms_url, "1");
-
+                // Compteur Monophasï¿½ IINST et IMAX doivent ï¿½tre reliï¿½s ï¿½
                 strcat(emoncms_url, ":");
                 strcat(emoncms_url, pvalue);
                 strcat(emoncms_url, ",");
@@ -1300,7 +1238,7 @@ int tlf_check_frame( char * pframe)
       {
         MYSQL mysql;
         
-        // Ecrit données dans base MySql.
+        // Ecrit donnï¿½es dans base MySql.
         sprintf(mysql_job, "INSERT INTO %s\n  (%s)\nVALUES\n  (%s);\n", opts.table, mysql_field, mysql_value);
         
         //if (opts.verbose)
@@ -1309,10 +1247,9 @@ int tlf_check_frame( char * pframe)
         if (opts.verbose)
           fprintf(stdout, "%s", mysql_job); 
 
-        if ( db_open(&mysql) != EXIT_SUCCESS )
+        if ( db_open(&mysql) != EXIT_SUCCESS ) {
           log_syslog(stderr, "%d: %s \n", mysql_errno(&mysql), mysql_error(&mysql));
-        else
-        {
+        } else {
             // execute SQL query
           if (mysql_query(&mysql,mysql_job))
           {
@@ -1363,61 +1300,6 @@ int tlf_check_frame( char * pframe)
 }
 
 /* ======================================================================
-Function: tlf_get_frame
-Purpose : check for teleinfo frame on network
-Input   : true if we need to wait for frame, false if async (take if any)
-Output  : true if frame ok, else false
-Comments: 
-====================================================================== */
-int tlf_get_frame(char block) 
-{
-  struct sockaddr_in tlf_from;
-  int fromlen = sizeof(tlf_from);
-  int n = 0;
-  int timeout = 100; // (10 * 100ms)
-  int ret  =false;
-  char  rcv_buff[TELEINFO_BUFSIZE];
-
-  // clear ou receive  buffer
-  memset(rcv_buff,0, TELEINFO_BUFSIZE );
-
-  // do until received or timed out
-  while (n<=0 && timeout--)
-  {
-    // read data received on socket ?
-    n = recvfrom(g_tlf_sock,rcv_buff,TELEINFO_BUFSIZE,0, (struct sockaddr *)&tlf_from,(socklen_t *)&fromlen);
-
-    // Do we received frame on socket ?
-    if (n > 0) 
-    {
-      //log_syslog( stderr, "recvfrom %d buffer='%s'\n",n, rcv_buff);
-      // check the frame and do stuff
-      ret = tlf_check_frame( rcv_buff );
-    }
-    else 
-    {
-      // want to wait frame ?
-      if ( block)
-      {
-        // Letting time to the Operating system doing other jobs
-        // Wait 100ms it won't bother us
-        usleep(100000);
-      }
-      else
-      {
-        break;
-      }
-    }
-  }
-  
-  // check for timed out
-  if (block && timeout<=0)
-      log_syslog( stderr, "tlf_get_frame() Time-Out Expired\n");
-    
-  return (ret);
-}
-
-/* ======================================================================
 Function: usage
 Purpose : display usage
 Input   : program name
@@ -1428,20 +1310,11 @@ int usage( char * name)
 {
 
   printf("%s %s\n", PRG_NAME, PRG_VERSION);
-  printf("Usage is: %s --mode s|r|t [options]\n", PRG_NAME);
-  printf("  --<m>mode  :  s (=send) | r (=receive) | t (=test)\n");
-  printf("                send    : read from serial and send the teleinfo frame to network\n");
-  printf("                          preconized mode for daemon\n");
-  printf("                receive : receive teleinfo frame from network\n");
-  printf("                          need another daemon in send mode\n");
-  printf("                test    : display teleinfo data received from serial\n");
+  printf("Usage is: %s [options]\n", PRG_NAME);
   printf("Options are:\n");
   printf("  --tt<y> dev  : open serial dev name\n");
   printf("  --no<l>ock   : do not create serial lock file\n");
   printf("  --<v>erbose  : speak more to user\n");
-  printf("  --<p>ort n   : send/receive on network port n (and n+1 on send mode)\n");
-  printf("  --<d>aemon   : daemonize the process\n");
-  printf("  --<g>et LABEL: get LABEL value from teleinfo (only possible with mode receive\n");
 #ifdef USE_MYSQL
   printf("  --mys<q>l    : send data to MySQL database\n");
   printf("  --<u>ser     : mysql user login\n");
@@ -1460,10 +1333,10 @@ int usage( char * name)
   printf("<?> indicates the equivalent short option.\n");
   printf("Short options are prefixed by \"-\" instead of by \"--\".\n");
   printf("Example :\n");
-  printf( "teleinfo -m s -d -y /dev/teleinfo\n\tstart teleinfo as a daemon to continuously send over the network the frame received on port /dev/teleinfo\n\n");
-  printf( "teleinfo -m s -y /dev/teleinfo\n\tstart teleinfo display the frame received from serial port /dev/teleinfo\n\n");
-  printf( "teleinfo -m r -v\n\tstart teleinfo to wait for a network frame, then display it and exit\n");
-  printf( "teleinfo -m r -g ADCO\n\tstart teleinfo to wait for a frame, then display ADCO field value and exit\n");
+  printf( "teleinfo -d -y /dev/teleinfo -q \n\tstart teleinfo as a daemon to continuously add the frame received on port /dev/teleinfo to a mysql database\n\n");
+  printf( "teleinfo -y /dev/teleinfo\n\tstart teleinfo display the frame received from serial port /dev/teleinfo\n\n");
+  printf( "teleinfo -v\n\tstart teleinfo to wait for a frame, then display it and exit\n");
+  printf( "teleinfo -g ADCO\n\tstart teleinfo to wait for a frame, then display ADCO field value and exit\n");
 #ifdef USE_MYSQL
   printf( "teleinfo -m r -q -v\n\tstart teleinfo to wait for a network frame, then display SQL Query and execute it and exit\n");
 #endif
@@ -1475,7 +1348,7 @@ int usage( char * name)
 
 /* ======================================================================
 Function: trim
-Purpose : remove leading en ending space char from a string
+Purpose : remove leading and ending space char from a string
 Input   : string pointer
 Output  : string pointer
 Comments: 
@@ -1525,38 +1398,6 @@ int parse_parameter(char c, char * optarg)
       opts.verbose = true;
     break;
 
-    case 'd':
-      opts.daemon = true;
-    break;
-
-    case 'm':
-      switch (optarg[0]) 
-      {
-        case 's':
-        case 'S':
-          opts.mode = MODE_SEND;
-          opts.mode_str = "send";
-        break;
-        case 't':
-        case 'T':
-          opts.mode = MODE_TEST;
-          opts.mode_str = "test";
-        break;
-        case 'r':
-        case 'R':
-          opts.mode = MODE_RECEIVE;
-          opts.mode_str = "receive";
-        break;
-        
-        default:
-          fprintf(stderr, "--mode '%c' ignored.\n", optarg[0]);
-          fprintf(stderr, "please select at least mode send, receive or test\n");
-          fprintf(stderr, "--mode can be one off: 's', 'r', or 't'\n");
-        break;
-
-      }
-    break;
-
     case 'g':
       strncpy(opts.value_str, optarg, sizeof(opts.value_str)-1 );
       opts.value_str[sizeof(opts.value_str) - 1] = '\0';
@@ -1567,16 +1408,6 @@ int parse_parameter(char c, char * optarg)
       opts.port[sizeof(opts.port) - 1] = '\0';
     break;
 
-    case 'p':
-      opts.netport = (int) atoi(optarg);
-      
-      if (opts.netport < 1024 || opts.netport > 65534)
-      {
-          fprintf(stderr, "--port '%d' ignored.\n", opts.netport);
-          fprintf(stderr, "--port must be between 1024 and 65534\n");
-          opts.netport = TELEINFO_PORT;
-      }
-    break;
 #ifdef USE_MYSQL
     case 's':
       strcpy(opts.server, optarg );
@@ -1650,10 +1481,6 @@ void read_config(int argc, char *argv[])
   {
     {"nolock",  no_argument,      0, 'l'},
     {"verbose", no_argument,      0, 'v'},
-    {"port",    required_argument,0, 'p'},
-    {"mode",    required_argument,0, 'm'},
-    {"daemon",  no_argument,      0, 'd'},
-    {"get"     ,required_argument,0, 'g'},
     {"tty"     ,required_argument,0, 'y'},
 #ifdef USE_MYSQL
     {"mysql",   no_argument,      0, 'q'},
@@ -1724,22 +1551,13 @@ void read_config(int argc, char *argv[])
             
             optionIndex = 0;
             
-            // Special options not available on command line
-            if (!strcmp(opt, "network"))
-            {
-              strncpy(opts.network, optdata, sizeof(opts.network) - 1);
-              opts.network[sizeof(opts.network) - 1] = '\0';
-            }
             #ifdef USE_MYSQL
             // Special options not available on command line
-            else if (!strcmp(opt, "mysql_port"))
+            if (!strcmp(opt, "mysql_port"))
             {
               opts.serverport = atoi(optdata);
             }
-            #endif
-            else
-            {
-              
+            #endif              
               // Loop thru all commons options we have on command line
               while ( longOptions[optionIndex].name )
               {
@@ -1767,7 +1585,6 @@ void read_config(int argc, char *argv[])
                 optionIndex++;
                 
               } // While options
-            }
           }
         }
       }
@@ -1780,7 +1597,7 @@ void read_config(int argc, char *argv[])
   optionIndex = 0;
   
   // default options
-  strcpy( str_opt, "lvhdm:p:g:y:");
+  strcpy( str_opt, "lvhm:p:g:y:");
   #ifdef USE_MYSQL
     strcat(str_opt, "qu:w:s:b:t:");
   #endif
@@ -1817,26 +1634,11 @@ void read_config(int argc, char *argv[])
     }
   } 
 
-  // be sure to have a known mode
-  if ( opts.mode == MODE_NONE )
-  {
-    fprintf(stderr, "No mode given\n");
-    fprintf(stderr, "please select at least one mode such send or receive\n");
-    exit(EXIT_FAILURE);
-  }
-  
-  if ( (opts.mode == MODE_SEND || opts.mode == MODE_TEST) && !opts.port)
+  if (!opts.port)
   { 
     fprintf(stderr, "No tty device given\n");
     fprintf(stderr, "please select at least tty device such as /dev/ttyS0\n");
     exit(EXIT_FAILURE);
-  }
-
-  // if we need to get a value, force mode to receive mode
-  if (*opts.value_str && opts.mode != MODE_RECEIVE)
-  {
-    opts.mode = MODE_RECEIVE;
-    opts.mode_str = "receive";
   }
 
   #ifdef USE_EMONCMS
@@ -1844,13 +1646,6 @@ void read_config(int argc, char *argv[])
   {
       fprintf(stderr, "--daemon ignored.\n");
       fprintf(stderr, "--daemon must be used only in mode send or emoncms\n");
-      opts.daemon = false;
-  }
-  #else
-  if (opts.daemon && opts.mode != MODE_SEND )
-  {
-      fprintf(stderr, "--daemon ignored.\n");
-      fprintf(stderr, "--daemon must be used only in mode send\n");
       opts.daemon = false;
   }
   #endif
@@ -1873,7 +1668,7 @@ void read_config(int argc, char *argv[])
       printf("Server is      : %s:%d\n", opts.server, opts.serverport);
       printf("Database is    : %s\n", opts.database);
       printf("Login is       : %s\n", opts.user);
-      printf("Password is    : %s\n", opts.password);
+      printf("Password is    : ********\n");
       printf("Table is       : %s\n", opts.table);
     }
 #endif
@@ -1889,9 +1684,6 @@ void read_config(int argc, char *argv[])
 #endif
 
     printf("-- Other Stuff -- \n");
-    printf("network is     : %s\n", opts.network);
-    printf("udp port is    : %d\n", opts.netport);
-    printf("mode is        : %s\n", opts.mode_str);
     printf("fetch value is : %s\n", opts.value_str);
     printf("nolock is      : %s\n", opts.nolock ? "yes" : "no");
     printf("verbose is     : %s\n", opts.verbose? "yes" : "no");
@@ -1908,7 +1700,8 @@ Comments:
 ====================================================================== */
 int main(int argc, char **argv)
 {
-  struct sockaddr_in server,client;
+//  struct sockaddr_in server,client;
+  struct sockaddr_in server;
   struct sigaction sa;
   fd_set rdset, wrset;
   int err_no;  
@@ -2006,87 +1799,18 @@ int main(int argc, char **argv)
   }
 #endif
   
-  // Receive frame from teleinfo server, so init network
-  if ( opts.mode == MODE_RECEIVE )
-  {
-    flags = fcntl(g_tlf_sock,F_GETFL,0);
-    fcntl(g_tlf_sock, F_SETFL, flags | O_NONBLOCK);
-
-    length = sizeof(server);
-    bzero(&server,length);
-    
-    server.sin_family=AF_INET;
-    server.sin_addr.s_addr=INADDR_ANY;
-    server.sin_port=htons(opts.netport);
-    
-    if ( bind(g_tlf_sock,(struct sockaddr *)&server,length) < 0 ) 
-      fatal("Error Binding Socket %d : %s\n", g_tlf_sock, strerror (errno));
-    else
-    {
-      if (opts.verbose)
-        log_syslog(stdout, "Binded on port %d\n",opts.netport);
-    }
-  }
-  
   // Just want to receive 1 frame then exit
-  if (!opts.daemon && opts.mode == MODE_RECEIVE )
-  {
-    if (opts.verbose)
-      log_syslog(stdout, "Inits succeded, waiting network frame\n");
-    
-    // Get one frame
-    length = tlf_get_frame(true);
-    
-    // exit
-    if (!length)
-      clean_exit( EXIT_FAILURE );
-    else    
-      clean_exit( EXIT_SUCCESS );
-  }
+	if (opts.verbose)
+	  log_syslog(stdout, "Inits succeded, waiting for a frame\n");
 
-  // Send mode need to broadcast serial frame, test mode just display
-  // so these modes open the serial port to get the frames
-  if ( opts.mode != MODE_RECEIVE )
-  {
-    // Open serial port
-    g_fd_teleinfo = tlf_init_serial();
+  // Open serial port
+  g_fd_teleinfo = tlf_init_serial();
 
-      // Test mode to need send frame
-    if ( opts.mode == MODE_SEND )
-    {
-      broadcast = 1; //might need '1' and char type
-      
-      if (setsockopt(g_tlf_sock, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast)) == -1)
-        log_syslog(stderr, "Could not allow broadcasting\n");
-      else 
-        log_syslog(stderr, "Broadcast routing enabled\n");
-    
-      client.sin_family = AF_INET;     // host byte order
-      client.sin_port = htons(opts.netport); 
-      client.sin_addr.s_addr = inet_addr(opts.network);
-      memset(client.sin_zero, '\0', sizeof (client.sin_zero));
-    }
-  }
-  
   log_syslog(stdout, "Inits succeded, entering Main loop\n");
   
-  if (opts.daemon)
-  {
-    log_syslog(stdout, "Starting as a daemon\n");
-    daemonize();
-  }
-
   // Do while not end
   while ( ! g_exit_pgm ) 
   {
-    // Receive mode
-    if ( opts.mode == MODE_RECEIVE )
-    {
-      // Wait until we got one frame
-      tlf_get_frame(true);
-    }
-    else
-    {
       // Read from serial port
       n = read(g_fd_teleinfo, &c, 1);
     
@@ -2094,7 +1818,7 @@ int main(int argc, char **argv)
         fatal("read failed: %s", strerror(errno));
 
       // Test mode display received char ?
-      if (opts.mode == MODE_TEST)
+      if (opts.verbose == true)
       {
         fprintf(stdout, "%c", c);
         fflush(stdout);
@@ -2124,34 +1848,9 @@ int main(int argc, char **argv)
 
             // need to send frame, no check, it will be done on the other side
             // by the receive mode of this program
-            if (opts.mode == MODE_SEND)
-            {
-              if (opts.verbose)
-                log_syslog(stderr, "Sending frame size %d to network\n", rcv_idx);
-              
-                
-              sendto(g_tlf_sock, rcv_buff, rcv_idx, 0, (struct sockaddr *) &client,  sizeof(struct sockaddr));
-              client.sin_port = htons(opts.netport+1); 
-              sendto(g_tlf_sock, rcv_buff, rcv_idx, 0, (struct sockaddr *) &client,  sizeof(struct sockaddr));
-              client.sin_port = htons(opts.netport); 
-
               // Update stats
               stats.framesent++;
 
-              // Do we need to do other job ?
-              #if defined USE_EMONCMS && defined USE_MYSQL
-                if (opts.emoncms || opts.mysql)
-                  tlf_check_frame(rcv_buff);
-              #elif defined USE_EMONCMS
-                if (opts.emoncms )
-                  tlf_check_frame(rcv_buff);
-              #elif defined USE_MYSQL
-                if (opts.mysql)
-                  tlf_check_frame(rcv_buff);
-              #endif
-            }
-            else
-            {
               // If frame  ok
               if ( (length = tlf_check_frame(rcv_buff)) > 0 )
               {
@@ -2172,15 +1871,9 @@ int main(int argc, char **argv)
                 // ..
                 // ..
                 // ..
+				clean_exit( EXIT_SUCCESS );
               }
             }
-          }
-          // May be begin of the program or other problem.
-          else
-          {
-            rcv_idx = 0;
-            bzero(rcv_buff, TELEINFO_BUFSIZE);
-          }
         break;
         
         // other char ?
@@ -2205,9 +1898,7 @@ int main(int argc, char **argv)
         }
         break;
       }
-      
-    }
-    
+          
   } // while not exit program
 
   log_syslog(stderr, "Program terminated\n");
