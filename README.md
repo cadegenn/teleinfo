@@ -1,3 +1,5 @@
+> L'auteur originel est [Hallard](https://github.com/hallard). Merci à lui.
+> Ci dessous le README amendé par mes modifs.
 
 Repository dédié à la Téléinformation
 =====================================
@@ -14,28 +16,33 @@ Et le nouveau projet Teleinfo Wifi Serveur dans un repo dédié
 
 Historique de ce repo et programme associé ci-dessous :
 
-Téléinfo Broadcast, mySQL et Emoncms
+Téléinfo, mySQL et Emoncms
 ====================================
-Ce programme qui permet de récupérer les trames téléinfo reçue par la liaison série d'un ordinateur (ou autre périphérique) puis de les envoyer (broadcaster) sur un reseau local. de ce fait, il est possible de récupérer ces informations sur une 
-(ou même plusieurs machines) pour en faire le traitement souhaité.
+Ce programme permet de récupérer les trames téléinfo reçue par la liaison série d'un ordinateur (ou autre périphérique). 
 
 Il est aussi capable d'envoyer les données de téléinfo vers une base mySQL ou un serveur Emoncms
  
 Ce programme fonctionne uniquement sous linux (testé sur Debian Lenny et wheezy) mais çà ne doit pas être sorcier de l'adapter pour Windows.
  
-Le fonctionnement est très simple, et peut être distingué en deux modes :
-  - Le mode serveur (ou daemon), c'est à dire qu'il ecoute les trames reçues sur le port série et les transfère immediatement via une trame UDP sur le réseau local. Petite subtilité, en fait deux trames identiques sont envoyés, une sur le port 1200 et l'autre sur le port 1201, tout simplement parce que mon PC de domotique utilise deux programmes pour traiter les données de téléinfo or deux programmes distincts ne peuvent pas se écouter (binder) simultanément sur le même port.
-  - mon daemon domotique avec l'affichage en temps réél des données téléinfo reçues
-  - un script executé toutes les 5 minutes pour envoyer les données de téléinfo sur la base MySQL
+Fidel aux préceptes UNIX, le programme ne fait qu'une seul chose : écouter sur un port série et retranscrire une trame téléinfo.
 
-  - Le mode client, c'est à dire qu'il écoute sur le réseau local une trame UDP (donc envoyée par de daemon) puis si celle-ci est valide, fait un traitement associé. Dans mon cas, soit on affiche la trame soit on stocke les données dans une base MySQL avec les valeurs reçues (le nom des champs de la table doit être le même que les champs de la trame reçue, donc un champs ADCO, …).
+On peut le compiler avec un support MySQL et/ou EmonCMS (non testé).
 
-Suivez mes nouveautés et autres projets sur mon [blog][4] 
+Le fonctionnement est le suivant :
+  - écouter sur le port série
+  - reconstituer une trame entière et valide téléinfo
+  - si compilé et exécuté avec le support MySQL, injecter les données dans une base
+  - si compilé et exécuté avec le support EmonCMS, envoyer les données à un serveur EmonCMS
+  - quitter
+
+Contrairement au programme original, cette version ne peut traiter qu'une seul trame par exécution. 
+
+Suivez les nouveautés et autres projets sur le [blog][4] de Charles-Henri Hallard.
 
 Installation et configuration
 ==============================
 
-Tout est documenté sur la page dédié [teleinfo][5] de mon blog 
+Tout est documenté sur la page dédié [teleinfo][5] de son blog. Mais je vais quand même détailler un peu ici.
 
 License
 =======
