@@ -1,4 +1,4 @@
-> L'auteur originel est [Hallard](https://github.com/hallard). Merci à lui.
+> L'auteur originel est [Charles-Henri Hallard](https://github.com/hallard). Merci à lui.
 > Ci dessous le README amendé par mes modifs.
 
 Repository dédié à la Téléinformation
